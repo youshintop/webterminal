@@ -19,7 +19,6 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-
 func main() {
 
 	r := gin.Default()

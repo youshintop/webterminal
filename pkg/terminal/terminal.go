@@ -1,15 +1,17 @@
 package terminal
 
 import (
-	"github.com/gorilla/websocket"
+	"encoding/json"
+	"fmt"
 	"io"
+
+	"github.com/gorilla/websocket"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
-
 
 const END_OF_TRANSMISSION = "\u0004"
 
@@ -21,9 +23,16 @@ type PtyHandler interface {
 
 // TerminalSession implements PtyHandler (using a SockJS connection)
 type TerminalSession struct {
-	ws				*websocket.Conn
-	sizeChan      chan remotecommand.TerminalSize
-	doneChan      chan struct{}
+	ws       *websocket.Conn
+	sizeChan chan remotecommand.TerminalSize
+	doneChan chan struct{}
+}
+
+type TerminalMessage struct {
+	Op   string `json:"op"`
+	Data string `json:"data,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
+	Cols uint16 `json:"cols,omitempty"`
 }
 
 // TerminalSize handles pty->process resize events
@@ -45,13 +54,32 @@ func (t TerminalSession) Read(p []byte) (int, error) {
 		// Send terminated signal to process to avoid resource leak
 		return copy(p, END_OF_TRANSMISSION), err
 	}
-	return copy(p, m), nil
+	var msg TerminalMessage
+	if err = json.Unmarshal(m, &msg); err != nil {
+		return copy(p, END_OF_TRANSMISSION), err
+	}
+	switch msg.Op {
+	case "stdin":
+		return copy(p, msg.Data), nil
+	case "resize":
+		//t.sizeChan <- remotecommand.TerminalSize{Width: msg.Cols, Height: msg.Rows}
+		return 0, nil
+	default:
+		return copy(p, END_OF_TRANSMISSION), fmt.Errorf("unknown message type '%s'", msg.Op)
+	}
 }
 
 // Write handles process->pty stdout
 // Called from remotecommand whenever there is any output
 func (t TerminalSession) Write(p []byte) (int, error) {
-	if err := t.ws.WriteMessage(websocket.TextMessage, p); err != nil {
+	msg, err := json.Marshal(TerminalMessage{
+		Op:   "stdout",
+		Data: string(p),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := t.ws.WriteMessage(websocket.TextMessage, msg); err != nil {
 		return 0, err
 	}
 	return len(p), nil
